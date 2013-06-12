@@ -1,0 +1,5 @@
+.hashdict.plt
+deps
+ebin
+logs
+test/*.beam

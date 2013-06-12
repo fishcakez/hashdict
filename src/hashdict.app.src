@@ -1,0 +1,14 @@
+{application, hashdict,
+ [
+  {description, "Dictionary for a small or large number of keys"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {modules, [
+             hashdict
+            ]},
+  {env, []}
+ ]}.
