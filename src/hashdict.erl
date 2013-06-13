@@ -477,14 +477,17 @@ node_contract(Node, Depth) ->
 
 node_contract(_Node, Acc, 0) ->
     Acc;
-node_contract(Node, [], N) ->
-    node_contract(Node, element(N, Node), N - 1);
 node_contract(Node, Acc, N) ->
     Bucket = element(N, Node),
     Acc2 = bucket_contract(Bucket, Acc),
     node_contract(Node, Acc2, N - 1).
 
-bucket_contract([?KV(Key, Value) | Bucket], Acc) ->
-    bucket_contract(Bucket, bucket_insert(Acc, Key, Value));
+bucket_contract([?KV(Key, _Value) = Elem | Bucket], [?KV(K, _V) | _Rest] = Acc)
+        when Key =< K ->
+    [Elem | bucket_contract(Bucket, Acc)];
+bucket_contract(Bucket, [Elem | Acc]) ->
+    [Elem | bucket_contract(Bucket, Acc)];
 bucket_contract([], Acc) ->
-    Acc.
+    Acc;
+bucket_contract(Bucket, []) ->
+    Bucket.
