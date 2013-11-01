@@ -1,6 +1,7 @@
 hashdict
 =======
-Erlang implementation of Elixir's `HashDict`, with `dict` api.
+Originally an erlang implementation of Elixir's `HashDict`, with `dict` api.
+However now the only common feature between the two is the hashing function.
 This dictionary should be suitable for both small and large number of keys.
 Installation
 ------------
