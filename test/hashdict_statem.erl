@@ -257,13 +257,15 @@ lists_equal(A, B) ->
     SetB = sets:from_list(B),
     sets:is_subset(SetA, SetB) andalso sets:is_subset(SetB, SetA).
 
-dicts_check(Dict, Hashdict) ->
+dicts_check(undefined = Dict, Hashdict) ->
     case hashdict:info(mode, Hashdict) of
-         ordered ->
-             ordered_check(Hashdict) andalso dicts_equal(Dict, Hashdict);
-         trie ->
-             trie_check(Hashdict) andalso dicts_equal(Dict, Hashdict)
-    end.
+        ordered ->
+            ordered_check(Hashdict) andalso dicts_equal(Dict, Hashdict);
+        trie ->
+            trie_check(Hashdict) andalso dicts_equal(Dict, Hashdict)
+    end;
+dicts_check(Dict, Hashdict) ->
+    dicts_equal(Dict, Hashdict).
 
 ordered_check(Hashdict) ->
     Threshold = hashdict:info(ordered_threshold, Hashdict),
@@ -275,36 +277,23 @@ ordered_check(Hashdict) ->
     end.
 
 trie_check(Hashdict) ->
-    (trie_check_contract_on(Hashdict) andalso
-     trie_check_expand_on(Hashdict)).
+    Root = hashdict:info(root, Hashdict),
+    is_tuple(Root) andalso trie_check_element(Root, Hashdict).
 
-%% Check that contract_on is correct given depth and contract_load, and
-%% check that dict should not have contracted.
-trie_check_contract_on(Hashdict) ->
-    Depth = hashdict:info(depth, Hashdict),
-    NodeSize = hashdict:info(node_size, Hashdict),
-    ContractLoad = hashdict:info(contract_load, Hashdict),
-    ContractOn = ContractLoad * round(math:pow(NodeSize, Depth)),
-    case hashdict:info(contract_on, Hashdict) of
-         ContractOn ->
-             hashdict:size(Hashdict) > ContractOn;
-         _Other ->
-             false
-    end.
-
-%% Check that expand_on is correct given depth and expand_load, and
-%% check that dict should not have expanded.
-trie_check_expand_on(Hashdict) ->
-    Depth = hashdict:info(depth, Hashdict),
-    NodeSize = hashdict:info(node_size, Hashdict),
-    ExpandLoad = hashdict:info(expand_load, Hashdict),
-    ExpandOn = ExpandLoad * round(math:pow(NodeSize, Depth+1)),
-    case hashdict:info(expand_on, Hashdict) of
-         ExpandOn ->
-             hashdict:size(Hashdict) =< ExpandOn;
-         _Other ->
-             false
-    end.
+trie_check_element(Node, Hashdict) when is_tuple(Node) ->
+    Elems = tuple_to_list(Node),
+    NonEmptyElems = [Elem || Elem <- Elems, Elem =/= []],
+    tuple_size(Node) =:= hashdict:info(node_size, Hashdict) andalso
+    [] =:= [error ||
+            Elem <- Elems, not trie_check_element(Elem, Hashdict)] andalso
+    %% A node should contract when it has 1 non empty bucket whose number of
+    %% k-v pairs is equal to or less than the contract load.
+    length(NonEmptyElems) =/= 0 andalso
+    (length(NonEmptyElems) =/= 1 orelse
+     is_tuple(hd(NonEmptyElems)) orelse
+     length(hd(NonEmptyElems)) > hashdict:info(contract_load, Hashdict));
+trie_check_element(Bucket, Hashdict) when is_list(Bucket) ->
+    length(Bucket) < hashdict:info(expand_load, Hashdict).
 
 dicts_equal(Dict, Hashdict) ->
     List = hashdict:to_list(Hashdict),

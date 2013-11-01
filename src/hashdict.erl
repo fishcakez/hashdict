@@ -48,7 +48,7 @@
 
 -define(ORDERED_THRESHOLD, 8).
 -define(EXPAND_LOAD, 5).
--define(CONTRACT_LOAD, 2).
+-define(CONTRACT_LOAD, 3).
 -define(NODE_BITMAP, 2#111).
 -define(NODE_SHIFT, 3).
 -define(NODE_SIZE, 8). % ?NODE_TEMPLATE and dict_node() assume this is 8.
@@ -61,10 +61,7 @@
                       dict_node(), dict_node(), dict_node(), dict_node()} |
                      {bucket(), bucket(), bucket(), bucket(),
                       bucket(), bucket(), bucket(), bucket()}.
--record(hashdict, {depth = 0 :: non_neg_integer(),
-                   expand_on = ?NODE_SIZE * ?EXPAND_LOAD :: pos_integer() ,
-                   contract_on = ?CONTRACT_LOAD :: pos_integer(),
-                   size = 0 :: non_neg_integer(),
+-record(hashdict, {size = 0 :: non_neg_integer(),
                    root = [] :: bucket() | dict_node()}).
 
 -opaque hashdict() :: #hashdict{}.
@@ -122,18 +119,17 @@ fetch_keys(Dict) ->
 -spec take(term(), hashdict()) -> {term(), term(), hashdict()}.
 take(Key, #hashdict{size=Size, root=Bucket} = Dict) when is_list(Bucket) ->
     case bucket_take(Bucket, Key) of
-         {Bucket2, {Value, Incr}} ->
-             {Key, Value, Dict#hashdict{size=(Size+Incr), root=Bucket2}};
-         {_Bucket2, _0} ->
+         {Bucket2, -1, Value} ->
+             {Key, Value, Dict#hashdict{size=(Size-1), root=Bucket2}};
+         {_Bucket2, 0, error} ->
              error(badarg, [Key, Dict])
     end;
 take(Key, #hashdict{size=Size, root=Root} = Dict) ->
     Fun = fun(Bucket) -> bucket_take(Bucket, Key) end,
-    case bucket_apply(Root, hash(Key), Fun) of
-         {Root2, {Value, Incr}} ->
-             {Key, Value, maybe_contract(Dict#hashdict{size=(Size+Incr),
-                                                       root=Root2})};
-         {_Root2, _0} ->
+    case bucket_apply_info(Root, hash(Key), Fun) of
+         {Root2, -1, Value} ->
+             {Key, Value, Dict#hashdict{size=(Size-1), root=Root2}};
+         {_Root2, 0, error} ->
              error(badarg, [Key, Dict])
     end.
 
@@ -144,19 +140,21 @@ erase(Key, #hashdict{size=Size, root=Bucket} = Dict) when is_list(Bucket) ->
 erase(Key, #hashdict{size=Size, root=Root} = Dict) ->
     Fun = fun(Bucket) -> bucket_erase(Bucket, Key) end,
     {Root2, Incr} = bucket_apply(Root, hash(Key), Fun),
-    maybe_contract(Dict#hashdict{size=(Size+Incr), root=Root2}).
+    Dict#hashdict{size=(Size+Incr), root=Root2}.
 
 -spec store(term(), term(), hashdict()) -> hashdict().
-store(Key, Value, Dict) ->
-    case maybe_expand(Dict) of
-         #hashdict{size=Size, root=Bucket} = Dict2 when is_list(Bucket) ->
-             {Bucket2, Incr} = bucket_store(Bucket, Key, Value),
-             Dict2#hashdict{size=(Size+Incr), root=Bucket2};
-         #hashdict{size=Size, root=Root} = Dict2 ->
-             Fun = fun(Bucket) -> bucket_store(Bucket, Key, Value) end,
-             {Root2, Incr} = bucket_apply(Root, hash(Key), Fun),
-             Dict2#hashdict{size=(Size+Incr), root=Root2}
-    end.
+store(Key, Value, #hashdict{size=Size, root=Bucket} = Dict)
+  when is_list(Bucket) ->
+    case bucket_store(Bucket, Key, Value) of
+        {Bucket2, Incr} when Incr > 0 andalso Size > ?ORDERED_THRESHOLD ->
+            Dict#hashdict{size=(Size+Incr), root=bucket_expand(Bucket2, 0)};
+        {Bucket2, Incr} ->
+            Dict#hashdict{size=(Size+Incr), root=Bucket2}
+    end;
+store(Key, Value, #hashdict{size=Size, root=Root} = Dict) ->
+    Fun = fun(Bucket) -> bucket_store(Bucket, Key, Value) end,
+    {Root2, Incr} = bucket_apply(Root, hash(Key), Fun),
+    Dict#hashdict{size=(Size+Incr), root=Root2}.
 
 -spec append(term(), term(), hashdict()) -> hashdict().
 append(Key, Value, Dict) ->
@@ -169,31 +167,33 @@ append_list(Key, List, Dict) ->
 -spec update(term(), fun((term())->term()), hashdict()) -> hashdict().
 update(Key, Fun, #hashdict{root=Bucket} = Dict) when is_list(Bucket) ->
     case bucket_update_existing(Bucket, Key, Fun) of
-         {Bucket2, ok} ->
+         {Bucket2, _Incr, ok} ->
              Dict#hashdict{root=Bucket2};
-         {_Bucket2, error} ->
+         {_Bucket2, _Incr, error} ->
              error(badarg, [Key, Fun, Dict])
     end;
 update(Key, Fun, #hashdict{root=Root} = Dict) ->
     Fun2 = fun(Bucket) -> bucket_update_existing(Bucket, Key, Fun) end,
-    case bucket_apply(Root, hash(Key), Fun2) of
-         {Root2, ok} ->
+    case bucket_apply_info(Root, hash(Key), Fun2) of
+         {Root2, _Incr, ok} ->
              Dict#hashdict{root=Root2};
-         {_Root2, error} ->
+         {_Root2, _Incr, error} ->
              error(badarg, [Key, Fun, Dict])
     end.
 
 -spec update(term(), fun((term())->term()), term(), hashdict()) -> hashdict().
-update(Key, Fun, Initial, Dict) ->
-     case maybe_expand(Dict) of
-         #hashdict{size=Size, root=Bucket} = Dict2 when is_list(Bucket) ->
-             {Bucket2, Incr} = bucket_update(Bucket, Key, Fun, Initial),
-             Dict2#hashdict{size=(Size+Incr), root=Bucket2};
-         #hashdict{size=Size, root=Root} = Dict2 ->
-             Fun2 = fun(Bucket) -> bucket_update(Bucket, Key, Fun, Initial) end,
-             {Root2, Incr} = bucket_apply(Root, hash(Key), Fun2),
-             Dict2#hashdict{size=(Size+Incr), root=Root2}
-    end.
+update(Key, Fun, Initial, #hashdict{size=Size, root=Bucket} = Dict)
+  when is_list(Bucket) ->
+    case bucket_update(Bucket, Key, Fun, Initial) of
+        {Bucket2, Incr} when Incr > 0 andalso Size > ?ORDERED_THRESHOLD ->
+            Dict#hashdict{size=(Size+Incr), root=bucket_expand(Bucket2, 0)};
+        {Bucket2, Incr} ->
+            Dict#hashdict{size=(Size+Incr), root=Bucket2}
+    end;
+update(Key, Fun, Initial, #hashdict{size=Size, root=Root} = Dict) ->
+    Fun2 = fun(Bucket) -> bucket_update(Bucket, Key, Fun, Initial) end,
+    {Root2, Incr} = bucket_apply(Root, hash(Key), Fun2),
+    Dict#hashdict{size=(Size+Incr), root=Root2}.
 
 -spec update_counter(term(), number(), hashdict()) -> hashdict().
 update_counter(Key, Incr, Dict) ->
@@ -221,7 +221,7 @@ filter(Fun, #hashdict{size=Size, root=Bucket} = Dict) when is_list(Bucket) ->
     Dict#hashdict{size=(Size+Incr), root=Bucket2};
 filter(Fun, #hashdict{size=Size, root=Root} = Dict) ->
     {Root2, Incr} = node_filter(Root, Fun),
-    maybe_contract(Dict#hashdict{size=(Size+Incr), root=Root2}).
+    Dict#hashdict{size=(Size+Incr), root=Root2}.
 
 -spec merge(fun((term(), term(), term())->term()), hashdict(), hashdict()) ->
     hashdict().
@@ -242,20 +242,16 @@ merge(Fun, DictA, DictB) ->
 %% @private Used for testing.
 info(size, #hashdict{size=Size}) ->
     Size;
-info(depth, #hashdict{depth=Depth}) ->
-    Depth;
-info(expand_on, #hashdict{expand_on=ExpandOn}) ->
-    ExpandOn;
-info(contract_on, #hashdict{contract_on=ContractOn}) ->
-    ContractOn;
+info(root, #hashdict{root=Root}) ->
+    Root;
 info(node_size, #hashdict{}) ->
     ?NODE_SIZE;
 info(expand_load, #hashdict{}) ->
-    ?EXPAND_LOAD;
+    ?EXPAND_LOAD+1;
 info(contract_load, #hashdict{}) ->
-    ?CONTRACT_LOAD;
+    ?CONTRACT_LOAD-1;
 info(ordered_threshold, #hashdict{}) ->
-    ?ORDERED_THRESHOLD;
+    ?ORDERED_THRESHOLD+1;
 info(mode, #hashdict{root=Bucket}) when is_list(Bucket) ->
     ordered;
 info(mode, #hashdict{}) ->
@@ -277,14 +273,53 @@ shift(Hash) ->
     Hash bsr ?NODE_SHIFT.
 
 bucket_apply(Node, Hash, Fun) ->
+    bucket_apply(Node, Hash, Fun, 0).
+
+bucket_apply(Node, Hash, Fun, Depth) ->
     Pos = index(Hash),
-    {Elem2, Result} = case element(Pos, Node) of
-                           Bucket when is_list(Bucket) ->
-                               Fun(Bucket);
-                           Elem ->
-                               bucket_apply(Elem, shift(Hash), Fun)
-                      end,
-    {setelement(Pos, Node, Elem2), Result}.
+    case element(Pos, Node) of
+        Bucket when is_list(Bucket) ->
+            case Fun(Bucket) of
+                {Bucket2, Incr} when Incr > 0 andalso
+                                     length(Bucket2) > ?EXPAND_LOAD ->
+                    Elem = bucket_expand(Bucket2, Depth+1),
+                    {setelement(Pos, Node, Elem), Incr};
+                {[], Incr} when Incr < 0 ->
+                    Node2 = setelement(Pos, Node, []),
+                    {node_contract(Node2), Incr};
+                {Bucket2, Incr} ->
+                    {setelement(Pos, Node, Bucket2), Incr}
+            end;
+        Elem ->
+            Depth2 = Depth + 1,
+            {Elem2, Incr} = bucket_apply(Elem, shift(Hash), Fun, Depth2),
+            {setelement(Pos, Node, Elem2), Incr}
+    end.
+
+bucket_apply_info(Node, Hash, Fun) ->
+    bucket_apply_info(Node, Hash, Fun, 0).
+
+bucket_apply_info(Node, Hash, Fun, Depth) ->
+    Pos = index(Hash),
+    case element(Pos, Node) of
+        Bucket when is_list(Bucket) ->
+            case Fun(Bucket) of
+                {Bucket2, Incr, Info} when Incr > 0 andalso
+                                           length(Bucket2) > ?EXPAND_LOAD ->
+                    Elem = bucket_expand(Bucket2, Depth+1),
+                    {setelement(Pos, Node, Elem), Incr, Info};
+                {[], Incr, Info} when Incr < 0 ->
+                    Node2 = setelement(Pos, Node, []),
+                    {node_contract(Node2), Incr, Info};
+                {Bucket2, Incr, Info} ->
+                    {setelement(Pos, Node, Bucket2), Incr, Info}
+            end;
+        Elem ->
+            Depth2 = Depth + 1,
+            {Elem2, Incr, Info} = bucket_apply_info(Elem, shift(Hash), Fun,
+                                                    Depth2),
+            {setelement(Pos, Node, Elem2), Incr, Info}
+    end.
 
 bucket_find([?KV(Key, Value) | _Bucket], Key) ->
     {ok, Value};
@@ -305,11 +340,11 @@ bucket_take(Bucket, Key) ->
     bucket_take(Bucket, Key, []).
 
 bucket_take([?KV(Key, Value) | Bucket], Key, Acc) ->
-    {lists:reverse(Acc, Bucket), {Value, -1}};
+    {lists:reverse(Acc, Bucket), -1, Value};
 bucket_take([?KV(K, _Value) = Elem | Bucket], Key, Acc) when K =< Key ->
     bucket_take(Bucket, Key, [Elem | Acc]);
 bucket_take(Bucket, _Key, Acc) ->
-    {lists:reverse(Acc, Bucket), 0}.
+    {lists:reverse(Acc, Bucket), 0, error}.
 
 bucket_erase(Bucket, Key) ->
     bucket_erase(Bucket, Key, []).
@@ -335,12 +370,12 @@ bucket_update_existing(Bucket, Key, Fun) ->
     bucket_update_existing(Bucket, Key, Fun, []).
 
 bucket_update_existing([?KV(Key, Value) | Bucket], Key, Fun, Acc) ->
-    {lists:reverse(Acc, [?KV(Key, Fun(Value)) | Bucket]), ok};
+    {lists:reverse(Acc, [?KV(Key, Fun(Value)) | Bucket]), 0, ok};
 bucket_update_existing([?KV(K, _V) = Elem | Bucket], Key, Fun, Acc)
         when K =< Key ->
     bucket_update_existing(Bucket, Key, Fun, [Elem | Acc]);
 bucket_update_existing(_Bucket, _Key, _Fun, _Acc) ->
-    {[], error}.
+    {[], 0, error}.
 
 bucket_update(Bucket, Key, Fun, Initial) ->
     bucket_update(Bucket, Key, Fun, Initial, []).
@@ -408,86 +443,45 @@ node_filter(Node, Fun, Incr) ->
 node_filter([Elem | Rest], Fun, Incr, Acc) ->
     {Elem2, Incr2} = node_filter(Elem, Fun, Incr),
     node_filter(Rest, Fun, Incr2, [Elem2 | Acc]);
+node_filter([], _Fun, Incr, Acc) when Incr < 0 ->
+    Node = list_to_tuple(lists:reverse(Acc)),
+    {node_contract(Node), Incr};
 node_filter([], _Fun, Incr, Acc) ->
     {list_to_tuple(lists:reverse(Acc)), Incr}.
 
-maybe_expand(#hashdict{size=?ORDERED_THRESHOLD, root=Bucket} = Dict)
-        when is_list(Bucket) ->
-    Root = node_relocate(Bucket, 0),
-    Dict#hashdict{root=Root};
-maybe_expand(#hashdict{depth=Depth, expand_on=Size,
-                       contract_on=ContractOn,
-                       size=Size, root=Root} = Dict) when is_tuple(Root) ->
-    Depth2 = Depth + 1,
-    Root2 = node_expand(Root, Depth, Depth2),
-    ExpandOn2 = Size * ?NODE_SIZE,
-    ContractOn2 = ContractOn * ?NODE_SIZE,
-    Dict#hashdict{depth=Depth2, expand_on=ExpandOn2, contract_on=ContractOn2,
-                  root=Root2};
-maybe_expand(Dict) ->
-    Dict.
+bucket_expand(Bucket, Depth) ->
+    bucket_expand(lists:reverse(Bucket), Depth, ?NODE_TEMPLATE).
 
-node_expand(Node, 0, DictDepth) ->
-    list_to_tuple([node_relocate(Bucket, DictDepth) ||
-                   Bucket <- tuple_to_list(Node)]);
-node_expand(Node, Depth, DictDepth) ->
-    Depth2 = Depth - 1,
-    list_to_tuple([node_expand(Elem, Depth2, DictDepth) ||
-                   Elem <- tuple_to_list(Node)]).
-
-node_relocate(Bucket, DictDepth) ->
-    node_relocate(Bucket, DictDepth, ?NODE_TEMPLATE).
-
-node_relocate([?KV(Key, Value) | Bucket], DictDepth, Node) ->
-    Pos = index(DictDepth, hash(Key)),
-    Bucket2 = bucket_insert(element(Pos, Node), Key, Value),
-    node_relocate(Bucket, DictDepth, setelement(Pos, Node, Bucket2));
-node_relocate([], _DictDepth, Node) ->
+bucket_expand([?KV(Key, _Value) = Pair | Bucket], Depth, Node) ->
+    Pos = index(Depth, hash(Key)),
+    Node2 = setelement(Pos, Node, [Pair | element(Pos, Node)]),
+    bucket_expand(Bucket, Depth, Node2);
+bucket_expand([], _Depth, Node) ->
     Node.
 
-bucket_insert([?KV(K, _V) = Elem | Bucket], Key, Value) when K < Key ->
-    [Elem | bucket_insert(Bucket, Key, Value)];
-bucket_insert(Bucket, Key, Value) ->
-    [?KV(Key, Value) | Bucket].
-
-
-maybe_contract(#hashdict{root=Bucket} = Dict) when is_list(Bucket) ->
-    Dict;
-maybe_contract(#hashdict{depth=0, contract_on=ContractOn, size=Size,
-                         root=Root} = Dict) when Size =< ContractOn ->
-    Bucket = node_contract(Root, 0),
-    Dict#hashdict{root=Bucket};
-maybe_contract(#hashdict{depth=Depth, expand_on=ExpandOn,
-                         contract_on=ContractOn,
-                         size=Size, root=Root} = Dict)
-        when Size =< ContractOn ->
-    Root2 = node_contract(Root, Depth),
-    maybe_contract(Dict#hashdict{depth = Depth - 1,
-                                 contract_on=(ContractOn div ?NODE_SIZE),
-                                 expand_on=(ExpandOn div ?NODE_SIZE),
-                                 root=Root2});
-maybe_contract(Dict) ->
-    Dict.
-
-node_contract(Node, 0) ->
-    node_contract(Node, [], ?NODE_SIZE);
-node_contract(Node, Depth) ->
-    Depth2 = Depth - 1,
-    list_to_tuple([node_contract(Elem, Depth2) || Elem <- tuple_to_list(Node)]).
-
-node_contract(_Node, Acc, 0) ->
-    Acc;
-node_contract(Node, Acc, N) ->
-    Bucket = element(N, Node),
-    Acc2 = bucket_contract(Bucket, Acc),
-    node_contract(Node, Acc2, N - 1).
-
-bucket_contract([?KV(Key, _Value) = Elem | Bucket], [?KV(K, _V) | _Rest] = Acc)
-        when Key =< K ->
-    [Elem | bucket_contract(Bucket, Acc)];
-bucket_contract(Bucket, [Elem | Acc]) ->
-    [Elem | bucket_contract(Bucket, Acc)];
-bucket_contract([], Acc) ->
-    Acc;
-bucket_contract(Bucket, []) ->
-    Bucket.
+node_contract({Bucket, [], [], [], [], [], [], []})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract({[], Bucket, [], [], [], [], [], []})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract({[], [], Bucket, [], [], [], [], []})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract({[], [], [], Bucket, [], [], [], []})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract({[], [], [], [], Bucket, [], [], []})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract({[], [], [], [], [], Bucket, [], []})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract({[], [], [], [], [], [], Bucket, []})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract({[], [], [], [], [], [], [], Bucket})
+  when length(Bucket) < ?CONTRACT_LOAD  ->
+    Bucket;
+node_contract(Node) ->
+    Node.
