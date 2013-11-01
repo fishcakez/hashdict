@@ -323,9 +323,9 @@ bucket_apply_info(Node, Hash, Fun, Depth) ->
 
 bucket_find([?KV(Key, Value) | _Bucket], Key) ->
     {ok, Value};
-bucket_find([?KV(K, _V) | Bucket], Key) when K =< Key ->
+bucket_find([_Elem | Bucket], Key) ->
     bucket_find(Bucket, Key);
-bucket_find(_Bucket, _Key) ->
+bucket_find([], _Key) ->
     error.
 
 bucket_get(Node, Hash) ->
@@ -340,53 +340,51 @@ bucket_take(Bucket, Key) ->
     bucket_take(Bucket, Key, []).
 
 bucket_take([?KV(Key, Value) | Bucket], Key, Acc) ->
-    {lists:reverse(Acc, Bucket), -1, Value};
-bucket_take([?KV(K, _Value) = Elem | Bucket], Key, Acc) when K =< Key ->
+    {Bucket ++ Acc, -1, Value};
+bucket_take([Elem | Bucket], Key, Acc) ->
     bucket_take(Bucket, Key, [Elem | Acc]);
-bucket_take(Bucket, _Key, Acc) ->
-    {lists:reverse(Acc, Bucket), 0, error}.
+bucket_take([], _Key, Acc) ->
+    {Acc, 0, error}.
 
 bucket_erase(Bucket, Key) ->
     bucket_erase(Bucket, Key, []).
 
 bucket_erase([?KV(Key, _Value) | Bucket], Key, Acc) ->
-    {lists:reverse(Acc, Bucket), -1};
-bucket_erase([?KV(K, _Value) = Elem | Bucket], Key, Acc) when K =< Key ->
+    {Bucket ++ Acc, -1};
+bucket_erase([Elem | Bucket], Key, Acc) ->
     bucket_erase(Bucket, Key, [Elem | Acc]);
-bucket_erase(Bucket, _Key, Acc) ->
-    {lists:reverse(Acc, Bucket), 0}.
+bucket_erase([], _Key, Acc) ->
+    {Acc, 0}.
 
 bucket_store(Bucket, Key, Value) ->
     bucket_store(Bucket, Key, Value, []).
 
 bucket_store([?KV(Key, _V) | Bucket], Key, Value, Acc) ->
-    {lists:reverse(Acc, [?KV(Key, Value) | Bucket]), 0};
-bucket_store([?KV(K, _V) = Elem | Bucket], Key, Value, Acc) when K =< Key ->
+    {Bucket ++ [?KV(Key, Value) | Acc], 0};
+bucket_store([Elem | Bucket], Key, Value, Acc) ->
     bucket_store(Bucket, Key, Value, [Elem | Acc]);
-bucket_store(Bucket, Key, Value, Acc) ->
-    {lists:reverse(Acc, [?KV(Key, Value) | Bucket]), 1}.
+bucket_store([], Key, Value, Acc) ->
+    {[?KV(Key, Value) | Acc], 1}.
 
 bucket_update_existing(Bucket, Key, Fun) ->
     bucket_update_existing(Bucket, Key, Fun, []).
 
 bucket_update_existing([?KV(Key, Value) | Bucket], Key, Fun, Acc) ->
-    {lists:reverse(Acc, [?KV(Key, Fun(Value)) | Bucket]), 0, ok};
-bucket_update_existing([?KV(K, _V) = Elem | Bucket], Key, Fun, Acc)
-        when K =< Key ->
+    {Bucket ++ [?KV(Key, Fun(Value)) | Acc], 0, ok};
+bucket_update_existing([Elem | Bucket], Key, Fun, Acc) ->
     bucket_update_existing(Bucket, Key, Fun, [Elem | Acc]);
-bucket_update_existing(_Bucket, _Key, _Fun, _Acc) ->
+bucket_update_existing([], _Key, _Fun, _Acc) ->
     {[], 0, error}.
 
 bucket_update(Bucket, Key, Fun, Initial) ->
     bucket_update(Bucket, Key, Fun, Initial, []).
 
 bucket_update([?KV(Key, Value) | Bucket], Key, Fun, _Initial, Acc) ->
-    {lists:reverse(Acc, [?KV(Key, Fun(Value)) | Bucket]), 0};
-bucket_update([?KV(K, _V) = Elem | Bucket], Key, Fun, Initial, Acc)
-        when K =< Key ->
+    {Bucket ++ [?KV(Key, Fun(Value)) | Acc], 0};
+bucket_update([Elem | Bucket], Key, Fun, Initial, Acc) ->
     bucket_update(Bucket, Key, Fun, Initial, [Elem | Acc]);
-bucket_update(Bucket, Key, _Fun, Initial, Acc) ->
-    {lists:reverse(Acc, [?KV(Key, Initial) | Bucket]), 1}.
+bucket_update([], Key, _Fun, Initial, Acc) ->
+    {[?KV(Key, Initial) | Acc], 1}.
 
 bucket_fold([?KV(Key, Value) | Bucket], Fun, Acc) ->
     Acc2 = Fun(Key, Value, Acc),
@@ -450,7 +448,7 @@ node_filter([], _Fun, Incr, Acc) ->
     {list_to_tuple(lists:reverse(Acc)), Incr}.
 
 bucket_expand(Bucket, Depth) ->
-    bucket_expand(lists:reverse(Bucket), Depth, ?NODE_TEMPLATE).
+    bucket_expand(Bucket, Depth, ?NODE_TEMPLATE).
 
 bucket_expand([?KV(Key, _Value) = Pair | Bucket], Depth, Node) ->
     Pos = index(Depth, hash(Key)),
